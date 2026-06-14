@@ -1,0 +1,7 @@
+[tools]
+go = "1.26.4"
+caddy = "latest"
+clang = "latest"
+
+[deps]
+go = { auto = true }
