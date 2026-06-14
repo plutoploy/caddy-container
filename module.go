@@ -1,22 +1,26 @@
 package caddycontainer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
 )
 
 func init() {
-	caddy.RegisterModule(ContainerList{})
+	caddy.RegisterModule(new(ContainerList))
 }
 
-func (ContainerList) CaddyModule() caddy.ModuleInfo {
+func (*ContainerList) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.container_list",
 		New: func() caddy.Module { return new(ContainerList) },
@@ -25,6 +29,9 @@ func (ContainerList) CaddyModule() caddy.ModuleInfo {
 
 type ContainerList struct {
 	SocketPaths []string `json:"socket_paths,omitempty"`
+
+	cli atomic.Pointer[client.Client]
+	mu  sync.Mutex
 }
 
 type ContainerInfo struct {
@@ -32,7 +39,19 @@ type ContainerInfo struct {
 	Ports string `json:"ports"`
 }
 
-func (cl ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+func (cl *ContainerList) getClient(ctx context.Context) (*client.Client, error) {
+	if c := cl.cli.Load(); c != nil {
+		return c, nil
+	}
+
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	// Double check
+	if c := cl.cli.Load(); c != nil {
+		return c, nil
+	}
+
 	socketPaths := cl.SocketPaths
 	if len(socketPaths) == 0 {
 		socketPaths = []string{
@@ -40,7 +59,6 @@ func (cl ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		}
 	}
 
-	var dockerClient *client.Client
 	for _, sock := range socketPaths {
 		if _, err := os.Stat(sock); os.IsNotExist(err) {
 			continue
@@ -53,19 +71,33 @@ func (cl ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		if err != nil {
 			continue
 		}
-		if _, err = c.Ping(r.Context()); err != nil {
+		if _, err = c.Ping(ctx); err != nil {
+			c.Close()
 			continue
 		}
 
-		dockerClient = c
-		break
+		cl.cli.Store(c)
+		return c, nil
 	}
 
-	if dockerClient == nil {
-		return caddyhttp.Error(http.StatusBadGateway, fmt.Errorf("no container runtime socket found"))
+	return nil, fmt.Errorf("no container runtime socket found")
+}
+
+// Cleanup implements caddy.CleanerUpper to close the Docker client when the module is unloaded.
+func (cl *ContainerList) Cleanup() error {
+	if c := cl.cli.Load(); c != nil {
+		return c.Close()
+	}
+	return nil
+}
+
+func (cl *ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	dockerClient, err := cl.getClient(r.Context())
+	if err != nil {
+		return caddyhttp.Error(http.StatusBadGateway, err)
 	}
 
-	containers, err := dockerClient.ContainerList(r.Context(), container.ListOptions{})
+	containers, err := dockerClient.ContainerList(r.Context(), types.ContainerListOptions{})
 	if err != nil {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}
@@ -74,19 +106,31 @@ func (cl ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 	for _, c := range containers {
 		name := ""
 		if len(c.Names) > 0 {
-			name = c.Names[0]
+			name = strings.TrimPrefix(c.Names[0], "/")
 		}
 
-		ports := ""
+		var ports []string
+		seen := make(map[uint16]bool)
 		for _, p := range c.Ports {
-			if p.PublicPort > 0 {
-				ports += fmt.Sprintf("%d", p.PrivatePort)
+			if p.PrivatePort > 0 && !seen[p.PrivatePort] {
+				seen[p.PrivatePort] = true
+				ports = append(ports, fmt.Sprintf("%d", p.PrivatePort))
 			}
 		}
 
-		result = append(result, ContainerInfo{Name: name, Ports: ports})
+		result = append(result, ContainerInfo{
+			Name:  name,
+			Ports: strings.Join(ports, ", "),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(result)
 }
+
+// Interface guards
+var (
+	_ caddy.Module                = (*ContainerList)(nil)
+	_ caddyhttp.MiddlewareHandler = (*ContainerList)(nil)
+	_ caddy.CleanerUpper          = (*ContainerList)(nil)
+)
