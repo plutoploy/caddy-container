@@ -2,7 +2,19 @@ package caddycontainer
 
 import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
+
+func init() {
+	httpcaddyfile.RegisterHandlerDirective("container_list", parseCaddyfile)
+}
+
+func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	cl := new(ContainerList)
+	err := cl.UnmarshalCaddyfile(h.Dispenser)
+	return cl, err
+}
 
 func (cl *ContainerList) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
