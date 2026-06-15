@@ -1,5 +1,4 @@
-package caddycontainer
-
+package caddy_container
 import (
 	"context"
 	"encoding/json"
@@ -83,7 +82,6 @@ func (cl *ContainerList) getClient(ctx context.Context) (*client.Client, error) 
 	return nil, fmt.Errorf("no container runtime socket found")
 }
 
-// Cleanup implements caddy.CleanerUpper to close the Docker client when the module is unloaded.
 func (cl *ContainerList) Cleanup() error {
 	if c := cl.cli.Load(); c != nil {
 		return c.Close()
@@ -128,7 +126,6 @@ func (cl *ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next 
 	return json.NewEncoder(w).Encode(result)
 }
 
-// Interface guards
 var (
 	_ caddy.Module                = (*ContainerList)(nil)
 	_ caddyhttp.MiddlewareHandler = (*ContainerList)(nil)
