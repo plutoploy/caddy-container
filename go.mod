@@ -1,4 +1,4 @@
-module plutoploy/caddy-container
+module github.com/plutoploy/caddy-container
 
 go 1.26.4
 
