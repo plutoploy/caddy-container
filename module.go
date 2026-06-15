@@ -1,4 +1,4 @@
-package caddy_container
+package caddycontainer
 import (
 	"context"
 	"encoding/json"
