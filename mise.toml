@@ -2,6 +2,7 @@
 go = "1.26.4"
 caddy = "latest"
 clang = "latest"
+"aqua:fish-shell/fish-shell" = "latest"
 
 [deps]
 go = { auto = true }
