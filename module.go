@@ -1,4 +1,5 @@
 package caddycontainer
+
 import (
 	"context"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
+	"go.uber.org/zap"
 )
 
 func init() {
@@ -29,8 +31,9 @@ func (*ContainerList) CaddyModule() caddy.ModuleInfo {
 type ContainerList struct {
 	SocketPaths []string `json:"socket_paths,omitempty"`
 
-	cli atomic.Pointer[client.Client]
-	mu  sync.Mutex
+	cli    atomic.Pointer[client.Client]
+	mu     sync.Mutex
+	logger *zap.Logger
 }
 
 type ContainerInfo struct {
@@ -82,6 +85,37 @@ func (cl *ContainerList) getClient(ctx context.Context) (*client.Client, error) 
 	return nil, fmt.Errorf("no container runtime socket found")
 }
 
+func (cl *ContainerList) Provision(ctx caddy.Context) error {
+	cl.logger = ctx.Logger(cl)
+
+	// Validate socket paths if provided
+	for i, path := range cl.SocketPaths {
+		expanded := os.ExpandEnv(path)
+		if expanded != path {
+			cl.SocketPaths[i] = expanded
+		}
+	}
+
+	// Set default socket path if none provided
+	if len(cl.SocketPaths) == 0 {
+		if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+			cl.SocketPaths = []string{
+				runtimeDir + "/podman/podman.sock",
+			}
+		}
+	}
+
+	cl.logger.Info("provisioned container_list", zap.Strings("socket_paths", cl.SocketPaths))
+	return nil
+}
+
+func (cl *ContainerList) Validate() error {
+	if len(cl.SocketPaths) == 0 {
+		return fmt.Errorf("no socket paths configured and XDG_RUNTIME_DIR not set")
+	}
+	return nil
+}
+
 func (cl *ContainerList) Cleanup() error {
 	if c := cl.cli.Load(); c != nil {
 		return c.Close()
@@ -127,6 +161,8 @@ func (cl *ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next 
 }
 
 var (
+	_ caddy.Provisioner           = (*ContainerList)(nil)
+	_ caddy.Validator             = (*ContainerList)(nil)
 	_ caddy.Module                = (*ContainerList)(nil)
 	_ caddyhttp.MiddlewareHandler = (*ContainerList)(nil)
 	_ caddy.CleanerUpper          = (*ContainerList)(nil)

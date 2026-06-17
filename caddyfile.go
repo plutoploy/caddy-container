@@ -10,6 +10,8 @@ func init() {
 	httpcaddyfile.RegisterHandlerDirective("container_list", parseCaddyfile)
 }
 
+var _ caddyfile.Unmarshaler = (*ContainerList)(nil)
+
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	cl := new(ContainerList)
 	err := cl.UnmarshalCaddyfile(h.Dispenser)
