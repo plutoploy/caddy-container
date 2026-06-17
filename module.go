@@ -12,10 +12,10 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 	"go.uber.org/zap"
-)
+	"reflect"
+	)
 
 func init() {
 	caddy.RegisterModule(new(ContainerList))
@@ -73,7 +73,7 @@ func (cl *ContainerList) getClient(ctx context.Context) (*client.Client, error) 
 		if err != nil {
 			continue
 		}
-		if _, err = c.Ping(ctx); err != nil {
+		if _, err = c.Ping(ctx, client.PingOptions{}); err != nil {
 			c.Close()
 			continue
 		}
@@ -87,8 +87,6 @@ func (cl *ContainerList) getClient(ctx context.Context) (*client.Client, error) 
 
 func (cl *ContainerList) Provision(ctx caddy.Context) error {
 	cl.logger = ctx.Logger(cl)
-
-	// Validate socket paths if provided
 	for i, path := range cl.SocketPaths {
 		expanded := os.ExpandEnv(path)
 		if expanded != path {
@@ -129,32 +127,74 @@ func (cl *ContainerList) ServeHTTP(w http.ResponseWriter, r *http.Request, next 
 		return caddyhttp.Error(http.StatusBadGateway, err)
 	}
 
-	containers, err := dockerClient.ContainerList(r.Context(), types.ContainerListOptions{})
+	containersRes, err := dockerClient.ContainerList(r.Context(), client.ContainerListOptions{})
 	if err != nil {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}
 
-	result := make([]ContainerInfo, 0, len(containers))
-	for _, c := range containers {
-		name := ""
-		if len(c.Names) > 0 {
-			name = strings.TrimPrefix(c.Names[0], "/")
+		// Normalize result to a slice of container reflect.Values regardless of return type
+		var containerVals []reflect.Value
+		rv := reflect.ValueOf(containersRes)
+		if rv.Kind() == reflect.Ptr {
+			rv = rv.Elem()
 		}
-
-		var ports []string
-		seen := make(map[uint16]bool)
-		for _, p := range c.Ports {
-			if p.PrivatePort > 0 && !seen[p.PrivatePort] {
-				seen[p.PrivatePort] = true
-				ports = append(ports, fmt.Sprintf("%d", p.PrivatePort))
+		if rv.IsValid() {
+			if rv.Kind() == reflect.Slice {
+				for i := 0; i < rv.Len(); i++ {
+					containerVals = append(containerVals, rv.Index(i))
+				}
+			} else if rv.Kind() == reflect.Struct {
+				// Find first slice field and use it
+				for i := 0; i < rv.NumField(); i++ {
+					f := rv.Field(i)
+					if f.Kind() == reflect.Slice {
+						for j := 0; j < f.Len(); j++ {
+							containerVals = append(containerVals, f.Index(j))
+						}
+						break
+					}
+				}
 			}
 		}
 
+		if len(containerVals) == 0 {
+			return caddyhttp.Error(http.StatusInternalServerError, fmt.Errorf("unexpected container list result type: %T", containersRes))
+		}
+
+		result := make([]ContainerInfo, 0, len(containerVals))
+		for _, cv := range containerVals {
+			// Extract name
+			name := ""
+			if fv := cv.FieldByName("Names"); fv.IsValid() && fv.Kind() == reflect.Slice && fv.Type().Elem().Kind() == reflect.String {
+				if fv.Len() > 0 {
+					name = strings.TrimPrefix(fv.Index(0).String(), "/")
+				}
+			} else if nv := cv.FieldByName("Name"); nv.IsValid() && nv.Kind() == reflect.String {
+				name = strings.TrimPrefix(nv.String(), "/")
+			}
+
+			// Extract ports
+			var ports []string
+			seen := make(map[uint64]bool)
+			if pv := cv.FieldByName("Ports"); pv.IsValid() && pv.Kind() == reflect.Slice {
+				for i := 0; i < pv.Len(); i++ {
+					portVal := pv.Index(i)
+					// try to find field PrivatePort
+					if pp := portVal.FieldByName("PrivatePort"); pp.IsValid() && (pp.Kind() >= reflect.Int && pp.Kind() <= reflect.Int64 || pp.Kind() >= reflect.Uint && pp.Kind() <= reflect.Uint64) {
+						portNum := pp.Convert(reflect.TypeOf(uint64(0))).Interface().(uint64)
+						if portNum > 0 && !seen[portNum] {
+							seen[portNum] = true
+							ports = append(ports, fmt.Sprintf("%d", portNum))
+						}
+					}
+				}
+			}
+
 		result = append(result, ContainerInfo{
-			Name:  name,
-			Ports: strings.Join(ports, ", "),
-		})
-	}
+				Name:  name,
+				Ports: strings.Join(ports, ", "),
+			})
+		}
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(result)
